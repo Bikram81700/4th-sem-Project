@@ -19,29 +19,32 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     $user = $stmt->fetch();
 
     if ($user && password_verify($password, $user['password'])) {
-        $userRole = $user['role'];
+        $role = $user['role'];
+        $_SESSION['user_id'] = $user['id'];
+        $_SESSION['role']    = $user['role'];
 
-        if ($userRole === 'hospital') {
+        if ($role === 'hospital') {
             $h = hospital_by_id($user['hospital_id']);
             if (!$h || $h['status'] === 'pending') {
+                session_unset();
+                session_destroy();
                 $error = 'Your hospital registration is currently pending review by the super admin. You will be able to log in once your license and details are approved.';
+                goto renderLogin;
             } elseif ($h['status'] === 'rejected') {
+                session_unset();
+                session_destroy();
                 $error = 'Your hospital registration was not approved. Please contact the platform administration for assistance.';
-            } else {
-                $_SESSION['user_id'] = $user['id'];
-                $_SESSION['role']    = $user['role'];
-                redirect('/admin/dashboard.php');
+                goto renderLogin;
             }
-        } else {
-            $_SESSION['user_id'] = $user['id'];
-            $_SESSION['role']    = $user['role'];
-            redirect($userRole === 'user' ? '/user/dashboard.php' : '/super-admin/dashboard.php');
         }
+
+        redirect($role === 'user' ? '/user/dashboard.php' : ($role === 'hospital' ? '/admin/dashboard.php' : '/super-admin/dashboard.php'));
     } else {
         $error = 'Invalid email or password.';
     }
 }
 
+renderLogin:
 $pageTitle = 'Log in';
 include __DIR__ . '/../includes/header.php';
 ?>
@@ -77,4 +80,3 @@ include __DIR__ . '/../includes/header.php';
 </div>
 
 <?php include __DIR__ . '/../includes/footer.php'; ?>
-

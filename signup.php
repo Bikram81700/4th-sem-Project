@@ -19,6 +19,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     $email    = trim($_POST['email'] ?? '');
     $password = $_POST['password'] ?? '';
 
+    /* ---- basic validation ---- */
     if ($name === '') {
         $errors[] = 'Full name is required.';
     }
@@ -29,6 +30,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         $errors[] = 'Password must be at least 6 characters.';
     }
 
+    /* ---- duplicate email check ---- */
     if (empty($errors)) {
         $stmt = $pdo->prepare("SELECT id FROM users WHERE email = ?");
         $stmt->execute([$email]);
@@ -37,6 +39,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         }
     }
 
+    /* ---- patient-specific validation ---- */
     if ($role === 'user' && empty($errors)) {
         $phone     = trim($_POST['phone'] ?? '');
         $blood     = trim($_POST['blood_group'] ?? '');
@@ -57,6 +60,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         }
     }
 
+    /* ---- hospital-specific fields ---- */
     $hospName = $city = $type = $specs = $licenseFileName = '';
     $coverPhotoName = '';
     $coverPhotoTmp  = null;
@@ -70,6 +74,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         if ($hospName === '') $errors[] = 'Hospital name is required.';
         if ($city === '')     $errors[] = 'City is required.';
 
+        /* License upload validation */
         $licenseErr = validate_file_upload(
             $_FILES['license'] ?? [],
             ['pdf', 'jpg', 'jpeg', 'png', 'webp'],
@@ -90,6 +95,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             }
         }
 
+        /* Cover photo upload validation */
         if (empty($errors)) {
             $coverErr = validate_file_upload(
                 $_FILES['cover_photo'] ?? [],
@@ -107,14 +113,17 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         }
     }
 
+    /* ---- insert into DB ---- */
     if (empty($errors)) {
         $pdo->beginTransaction();
         try {
             if ($role === 'hospital') {
+                /* 1. Create hospital record */
                 $stmt = $pdo->prepare("INSERT INTO hospitals (name, city, type, specializations, status, license_file, created_at) VALUES (?, ?, ?, ?, 'pending', ?, NOW())");
                 $stmt->execute([$hospName, $city, $type, $specs, $licenseFileName]);
                 $hospitalId = $pdo->lastInsertId();
 
+                /* 2. Move cover photo */
                 if ($coverPhotoTmp && $coverPhotoName !== '') {
                     $coverDir = __DIR__ . '/../assets/images/hospital_photos/' . $hospitalId;
                     if (!is_dir($coverDir)) {
@@ -126,6 +135,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                     }
                 }
 
+                /* 3. Create hospital admin user */
                 $stmt = $pdo->prepare("INSERT INTO users (name, email, password, role, hospital_id, created_at) VALUES (?, ?, ?, 'hospital', ?, NOW())");
                 $stmt->execute([$name, $email, password_hash($password, PASSWORD_DEFAULT), $hospitalId]);
 
@@ -136,12 +146,14 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 $submittedAdminEmail = $email;
 
             } else {
+                /* Patient / user account */
                 $stmt = $pdo->prepare("INSERT INTO users (name, email, password, role, phone, blood_group, address, emergency_contact, created_at) VALUES (?, ?, ?, 'user', ?, ?, ?, ?, NOW())");
                 $stmt->execute([$name, $email, password_hash($password, PASSWORD_DEFAULT), $phone, $blood, $address, $emergency]);
                 $newUserId = $pdo->lastInsertId();
 
                 $pdo->commit();
 
+                /* Log in and redirect immediately — no JS redirect needed */
                 $_SESSION['user_id'] = $newUserId;
                 $_SESSION['role']    = 'user';
                 flash('success', 'Welcome to BedTrack, ' . $name . '! Your account has been created.');
@@ -154,7 +166,6 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         }
     }
 }
-
 
 $pageTitle = 'Register';
 include __DIR__ . '/../includes/header.php';
