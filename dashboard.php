@@ -1,127 +1,205 @@
 <?php
+/**
+ * BedTrack - Admin Dashboard
+ * Provides hospital administrators with real-time ward stats, cover photo upload,
+ * ward map grid visualization, and recent patient booking requests.
+ */
+
 require_once __DIR__ . '/../config/functions.php';
-require_role('user');
-$u = current_user();
 
-$stmt = $pdo->prepare("SELECT COUNT(*) FROM bookings WHERE user_id = ?");
-$stmt->execute([$u['id']]);
-$totalBookings = (int)$stmt->fetchColumn();
+// Ensure user has hospital admin permissions
+require_role('hospital');
 
-$stmt = $pdo->prepare("SELECT COUNT(*) FROM bookings WHERE user_id = ? AND status = 'pending'");
-$stmt->execute([$u['id']]);
-$pendingBookings = (int)$stmt->fetchColumn();
+$currentUser = current_user();
+$hospitalId  = (int) $currentUser['hospital_id'];
+$hospital    = hospital_by_id($hospitalId);
 
-$stmt = $pdo->prepare("SELECT COUNT(*) FROM bookings WHERE user_id = ? AND status = 'accepted'");
-$stmt->execute([$u['id']]);
-$activeBookings = (int)$stmt->fetchColumn();
+// Handle hospital cover photo upload submission
+if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['upload_cover'])) {
+    verify_csrf();
 
-$approvedHospitals = (int)$pdo->query("SELECT COUNT(*) FROM hospitals WHERE status='approved'")->fetchColumn();
+    if (!empty($_FILES['cover_photo']['name'])) {
+        $allowedExtensions = ['jpg', 'jpeg', 'png', 'webp'];
+        $uploadedExt       = strtolower(pathinfo($_FILES['cover_photo']['name'], PATHINFO_EXTENSION));
 
+        if (!in_array($uploadedExt, $allowedExtensions)) {
+            flash('error', 'Cover photo must be JPG, PNG, or WEBP.');
+        } elseif ($_FILES['cover_photo']['error'] === UPLOAD_ERR_OK) {
+            $uploadDir = __DIR__ . '/../assets/images/hospital_photos/' . $hospitalId;
+            if (!is_dir($uploadDir)) {
+                mkdir($uploadDir, 0777, true);
+            }
+
+            // Remove existing cover photo file if present
+            $existingPhoto = $hospital['cover_photo'] ?? null;
+            if ($existingPhoto && file_exists($uploadDir . '/' . $existingPhoto)) {
+                unlink($uploadDir . '/' . $existingPhoto);
+            }
+
+            // Generate clean unique filename and store upload
+            $sanitizedOriginalName = preg_replace('/[^a-zA-Z0-9_.-]/', '_', $_FILES['cover_photo']['name']);
+            $newFileName           = 'cover_' . time() . '_' . $sanitizedOriginalName;
+            $targetFilePath        = $uploadDir . '/' . $newFileName;
+
+            if (move_uploaded_file($_FILES['cover_photo']['tmp_name'], $targetFilePath)) {
+                $stmt = $pdo->prepare("UPDATE hospitals SET cover_photo = ? WHERE id = ?");
+                $stmt->execute([$newFileName, $hospitalId]);
+                flash('success', 'Your hospital cover photo has been updated.');
+            } else {
+                flash('error', 'Could not upload the cover photo. Please try again.');
+            }
+        } else {
+            flash('error', 'The cover photo upload failed. Please try again.');
+        }
+    } else {
+        flash('error', 'Please choose a cover photo to upload.');
+    }
+
+    redirect('/admin/dashboard.php');
+}
+
+// Fetch total and available bed counts
+$totalBeds     = total_beds_of_hospital($hospitalId);
+$availableBeds = available_beds_of_hospital($hospitalId);
+$occupiedBeds  = $totalBeds - $availableBeds;
+
+// Fetch pending booking request count
+$stmt = $pdo->prepare("SELECT COUNT(*) FROM bookings WHERE hospital_id = ? AND status = 'pending'");
+$stmt->execute([$hospitalId]);
+$pendingCount = (int) $stmt->fetchColumn();
+
+// Fetch ward map bed cell statuses (limit 120 for layout display)
+$stmt = $pdo->prepare("SELECT status FROM beds WHERE hospital_id = ? LIMIT 120");
+$stmt->execute([$hospitalId]);
+$wardCells = $stmt->fetchAll();
+
+// Fetch 6 most recent bookings for dashboard overview
 $stmt = $pdo->prepare("
-  SELECT b.*, h.name AS hospital_name, c.name AS category_name
-  FROM bookings b
-  JOIN hospitals h ON h.id = b.hospital_id
-  JOIN bed_categories c ON c.id = b.category_id
-  WHERE b.user_id = ?
-  ORDER BY b.id DESC LIMIT 5
+    SELECT b.*, c.name AS category_name 
+    FROM bookings b
+    JOIN bed_categories c ON c.id = b.category_id
+    WHERE b.hospital_id = ? 
+    ORDER BY b.id DESC 
+    LIMIT 6
 ");
-$stmt->execute([$u['id']]);
-$recent = $stmt->fetchAll();
+$stmt->execute([$hospitalId]);
+$recentBookings = $stmt->fetchAll();
 
-$active = 'dashboard';
+$coverPhotoUrl = hospital_cover_photo($hospitalId);
+
+// Page layout configuration
+$active    = 'dashboard';
+$role      = 'hospital';
 $pageTitle = 'Dashboard';
-include __DIR__ . '/../includes/patient-head.php';
-include __DIR__ . '/../includes/patient-nav.php';
-include __DIR__ . '/../includes/patient-main-open.php';
 
-$firstName = $u ? explode(' ', $u['name'])[0] : '';
+include __DIR__ . '/../includes/header.php';
 ?>
-    <!-- Header -->
-    <div class="flex flex-col md:flex-row md:items-end justify-between gap-4 mb-6">
-      <div>
-        <h1 class="text-[28px] md:text-[32px] font-semibold text-[#161d19] font-['Plus_Jakarta_Sans'] tracking-[-0.01em] mb-1">Welcome back, <?php echo esc($firstName); ?></h1> <br>
-        <p class="text-[15px] md:text-[16px] text-[#3c4a42]">Here's where things stand across your bookings.</p>
+
+<div class="app-shell">
+  <?php include __DIR__ . '/../includes/sidebar.php'; ?>
+
+  <div class="main">
+    <h1><?php echo esc($hospital['name']); ?></h1>
+    <p class="lede">A live snapshot of your ward.</p>
+
+    <!-- Hospital Cover Photo Management -->
+    <div class="card">
+      <h3>Hospital cover photo</h3>
+      <?php if ($coverPhotoUrl): ?>
+        <img class="hospital-detail-cover" src="<?php echo esc($coverPhotoUrl); ?>" alt="<?php echo esc($hospital['name']); ?> cover photo" style="margin-bottom: 16px;">
+      <?php else: ?>
+        <img class="hospital-detail-cover" src="https://images.unsplash.com/photo-1587351021759-3e566b2af12a?w=600&h=300&fit=crop" alt="<?php echo esc($hospital['name']); ?> cover photo" style="margin-bottom: 16px;">
+      <?php endif; ?>
+
+      <form method="post" enctype="multipart/form-data">
+        <?php echo csrf_field(); ?>
+        <input type="hidden" name="upload_cover" value="1">
+        
+        <div class="field">
+          <label>Choose a cover photo</label>
+          <input type="file" name="cover_photo" accept=".jpg,.jpeg,.png,.webp" required>
+          <small>Use one image so patients can see the hospital design.</small>
+        </div>
+        
+        <button type="submit" class="btn btn-primary">Upload cover photo</button>
+      </form>
+    </div>
+
+    <!-- Ward Statistics Cards Grid -->
+    <div class="stat-grid">
+      <div class="stat-card">
+        <div class="label">Total beds</div>
+        <div class="num"><?php echo $totalBeds; ?></div>
+      </div>
+      
+      <div class="stat-card">
+        <div class="label">Available</div>
+        <div class="num" style="color: var(--teal);"><?php echo $availableBeds; ?></div>
+      </div>
+
+      <div class="stat-card">
+        <div class="label">Occupied</div>
+        <div class="num" style="color: var(--rust);"><?php echo $occupiedBeds; ?></div>
+      </div>
+
+      <div class="stat-card">
+        <div class="label">Pending requests</div>
+        <div class="num" style="color: var(--amber);"><?php echo $pendingCount; ?></div>
       </div>
     </div>
 
-    <!-- Stats Cards -->
-    <div class="grid grid-cols-2 lg:grid-cols-4 gap-3 md:gap-4 mb-6">
-      <div class="bg-white border border-[#bbcabf] rounded-xl p-4 md:p-5 shadow-sm">
-        <p class="text-[10px] md:text-[11px] font-semibold text-[#3c4a42] uppercase tracking-wider mb-1 md:mb-2">TOTAL BOOKINGS</p>
-        <p class="text-[32px] md:text-[40px] font-bold text-[#161d19] font-['Plus_Jakarta_Sans']"><?php echo $totalBookings; ?></p>
+    <!-- Live Ward Map Grid -->
+    <div class="card">
+      <h3>Ward map</h3>
+      
+      <div class="wardmap">
+        <?php foreach ($wardCells as $cell): ?>
+          <div class="cell <?php echo esc($cell['status']); ?>"></div>
+        <?php endforeach; ?>
       </div>
-      <div class="bg-white border border-[#bbcabf] rounded-xl p-4 md:p-5 shadow-sm">
-        <p class="text-[10px] md:text-[11px] font-semibold text-[#3c4a42] uppercase tracking-wider mb-1 md:mb-2">PENDING</p>
-        <p class="text-[32px] md:text-[40px] font-bold text-[#06b6d4] font-['Plus_Jakarta_Sans']"><?php echo $pendingBookings; ?></p>
-      </div>
-      <div class="bg-white border border-[#bbcabf] rounded-xl p-4 md:p-5 shadow-sm">
-        <p class="text-[10px] md:text-[11px] font-semibold text-[#3c4a42] uppercase tracking-wider mb-1 md:mb-2">ACTIVE / ACCEPTED</p>
-        <p class="text-[32px] md:text-[40px] font-bold text-[#161d19] font-['Plus_Jakarta_Sans']"><?php echo $activeBookings; ?></p>
-      </div>
-      <div class="bg-white border border-[#bbcabf] rounded-xl p-4 md:p-5 shadow-sm">
-        <p class="text-[10px] md:text-[11px] font-semibold text-[#3c4a42] uppercase tracking-wider mb-1 md:mb-2">APPROVED HOSPITALS</p>
-        <p class="text-[32px] md:text-[40px] font-bold text-[#161d19] font-['Plus_Jakarta_Sans']"><?php echo $approvedHospitals; ?></p>
+
+      <div class="legend">
+        <span><i style="background: var(--teal);"></i>Available</span>
+        <span><i style="background: var(--rust);"></i>Occupied</span>
       </div>
     </div>
 
-    <!-- Recent Bookings -->
-    <div class="bg-white border border-[#bbcabf] rounded-xl shadow-sm overflow-hidden">
-      <div class="px-4 md:px-5 py-3 md:py-4 border-b border-[#bbcabf] bg-[#ecfeff] flex justify-between items-center">
-        <h2 class="text-[16px] md:text-[18px] font-semibold text-[#161d19]">Recent bookings</h2>
-        <a href="<?php echo BASE_URL; ?>/user/my-bookings.php" class="text-[13px] font-semibold text-[#06b6d4] hover:underline">View all &rarr;</a>
+    <!-- Recent Booking Activity -->
+    <div class="card">
+      <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px;">
+        <h3 style="margin: 0;">Recent bookings</h3>
+        <a class="btn btn-sm" href="<?php echo BASE_URL; ?>/admin/bookings.php">Manage bookings &rarr;</a>
       </div>
-      <?php if (empty($recent)): ?>
-        <div class="p-8 md:p-10 text-center">
-          <h4 class="text-[16px] md:text-[18px] font-semibold text-[#161d19] mb-2">No bookings yet</h4>
-          <p class="text-[13px] md:text-[14px] text-[#3c4a42] mb-4">Browse hospitals and book a bed when you need one.</p>
-          <a class="inline-block bg-[#06b6d4] text-white rounded-lg px-5 md:px-6 py-2 md:py-2.5 text-[11px] md:text-[12px] font-semibold hover:bg-[#0891b2]" href="<?php echo BASE_URL; ?>/user/hospitals.php">Browse hospitals</a>
+
+      <?php if (empty($recentBookings)): ?>
+        <div class="empty">
+          <h4>No bookings yet</h4>
         </div>
       <?php else: ?>
-        <div class="overflow-x-auto">
-          <table class="w-full text-left">
-            <thead>
-              <tr class="border-b border-[#bbcabf]">
-                <th class="px-3 md:px-5 py-2 md:py-3 text-[10px] md:text-[11px] font-semibold text-[#3c4a42] uppercase tracking-wider">PATIENT</th>
-                <th class="px-3 md:px-5 py-2 md:py-3 text-[10px] md:text-[11px] font-semibold text-[#3c4a42] uppercase tracking-wider">HOSPITAL</th>
-                <th class="px-3 md:px-5 py-2 md:py-3 text-[10px] md:text-[11px] font-semibold text-[#3c4a42] uppercase tracking-wider">CATEGORY</th>
-                <th class="px-3 md:px-5 py-2 md:py-3 text-[10px] md:text-[11px] font-semibold text-[#3c4a42] uppercase tracking-wider">DATE</th>
-                <th class="px-3 md:px-5 py-2 md:py-3 text-[10px] md:text-[11px] font-semibold text-[#3c4a42] uppercase tracking-wider">STATUS</th>
+        <table>
+          <thead>
+            <tr>
+              <th>Patient</th>
+              <th>Category</th>
+              <th>Date</th>
+              <th>Status</th>
+            </tr>
+          </thead>
+          <tbody>
+            <?php foreach ($recentBookings as $b): ?>
+              <tr>
+                <td><?php echo esc($b['patient_name']); ?></td>
+                <td><?php echo esc($b['category_name']); ?></td>
+                <td><?php echo esc($b['booking_date']); ?></td>
+                <td><?php echo badge($b['status']); ?></td>
               </tr>
-            </thead>
-            <tbody>
-              <?php foreach ($recent as $b): ?>
-              <tr class="hover:bg-[#ecfeff] transition-colors border-b border-[#dde4dd]">
-                <td class="px-3 md:px-5 py-3 md:py-3.5 text-[13px] md:text-[14px] text-[#161d19]">
-                  <?php echo esc($b['patient_name']); ?>
-                  <?php if ($b['booking_for'] === 'other'): ?>
-                    <span class="text-[#3c4a42] text-[11px] md:text-xs">(by attendant)</span>
-                  <?php endif; ?>
-                </td>
-                <td class="px-3 md:px-5 py-3 md:py-3.5 text-[13px] md:text-[14px] text-[#3c4a42]"><?php echo esc($b['hospital_name']); ?></td>
-                <td class="px-3 md:px-5 py-3 md:py-3.5 text-[13px] md:text-[14px] text-[#3c4a42]"><?php echo esc($b['category_name']); ?></td>
-                <td class="px-3 md:px-5 py-3 md:py-3.5 text-[13px] md:text-[14px] text-[#3c4a42]"><?php echo esc($b['booking_date']); ?></td>
-                <td class="px-3 md:px-5 py-3 md:py-3.5">
-                  <?php 
-                    $statusClass = 'status-pill-pending';
-                    if ($b['status'] === 'accepted') $statusClass = 'status-pill-accepted';
-                    else if ($b['status'] === 'discharged') $statusClass = 'status-pill-discharged';
-                    else if ($b['status'] === 'rejected') $statusClass = 'status-pill-rejected';
-                  ?>
-                  <span class="status-pill <?php echo $statusClass; ?> text-[11px] md:text-[12px]"><?php echo esc(ucfirst($b['status'])); ?></span>
-                </td>
-              </tr>
-              <?php endforeach; ?>
-            </tbody>
-          </table>
-        </div>
+            <?php endforeach; ?>
+          </tbody>
+        </table>
       <?php endif; ?>
     </div>
+  </div>
+</div>
 
-    <!-- Action Button -->
-    <div class="mt-6">
-      <a class="inline-flex items-center gap-2 bg-[#06b6d4] text-white px-5 md:px-6 py-2.5 md:py-3 rounded-xl text-[14px] md:text-[15px] font-semibold hover:bg-[#0891b2] transition-colors shadow-sm" href="<?php echo BASE_URL; ?>/user/hospitals.php">
-        <span class="material-symbols-outlined text-[20px]">add_circle</span>
-        <span>Book a bed</span>
-      </a>
-    </div>
-<?php include __DIR__ . '/../includes/patient-foot.php'; ?>
+<?php include __DIR__ . '/../includes/footer.php'; ?>
+
